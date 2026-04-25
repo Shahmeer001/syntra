@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+supabase
+python-dotenv
+pydantic
+langchain-core
+langchain-groq
+langgraph
+stripe
+ 
