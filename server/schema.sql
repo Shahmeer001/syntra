@@ -1,8 +1,8 @@
 -- ================================================================
--- Syntra — Full Database Schema (All 6 Chunks)
+-- Syntra — Full Database Schema (All 7 Chunks)
 -- Run once in Supabase SQL Editor
 -- ================================================================
- 
+
 -- CHUNK 1: Workspaces
 CREATE TABLE workspaces (
   id            UUID DEFAULT gen_random_uuid() PRIMARY KEY,
@@ -12,7 +12,7 @@ CREATE TABLE workspaces (
   created_at    TIMESTAMPTZ DEFAULT NOW(),
   updated_at    TIMESTAMPTZ DEFAULT NOW()
 );
- 
+
 -- CHUNK 2: Agents
 CREATE TABLE agents (
   id            UUID DEFAULT gen_random_uuid() PRIMARY KEY,
@@ -25,7 +25,7 @@ CREATE TABLE agents (
   is_active     BOOLEAN DEFAULT TRUE,
   created_at    TIMESTAMPTZ DEFAULT NOW()
 );
- 
+
 -- CHUNK 3: Tasks
 CREATE TABLE tasks (
   id               UUID DEFAULT gen_random_uuid() PRIMARY KEY,
@@ -39,7 +39,19 @@ CREATE TABLE tasks (
   created_at       TIMESTAMPTZ DEFAULT NOW(),
   updated_at       TIMESTAMPTZ DEFAULT NOW()
 );
- 
+
+-- CHUNK 3B: Execution Logs (NEW - tracks task execution steps)
+CREATE TABLE execution_logs (
+  id               UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+  task_id          UUID REFERENCES tasks(id) ON DELETE CASCADE NOT NULL,
+  agent_id         UUID REFERENCES agents(id) ON DELETE SET NULL,
+  log_type         TEXT DEFAULT 'info' CHECK (log_type IN ('info','progress','success','error','warning')),
+  message          TEXT NOT NULL,
+  execution_data   JSONB DEFAULT '{}',
+  timestamp        TIMESTAMPTZ DEFAULT NOW(),
+  created_at       TIMESTAMPTZ DEFAULT NOW()
+);
+
 -- CHUNK 4: Collaborations
 CREATE TABLE collaborations (
   id            UUID DEFAULT gen_random_uuid() PRIMARY KEY,
@@ -50,7 +62,7 @@ CREATE TABLE collaborations (
   status        TEXT DEFAULT 'pending' CHECK (status IN ('pending','running','done','failed')),
   created_at    TIMESTAMPTZ DEFAULT NOW()
 );
- 
+
 -- CHUNK 5: Meeting Room Messages
 CREATE TABLE meeting_messages (
   id            UUID DEFAULT gen_random_uuid() PRIMARY KEY,
@@ -64,7 +76,7 @@ CREATE TABLE meeting_messages (
   session_id    TEXT DEFAULT '',
   created_at    TIMESTAMPTZ DEFAULT NOW()
 );
- 
+
 -- CHUNK 6: Subscriptions
 CREATE TABLE subscriptions (
   id                      UUID DEFAULT gen_random_uuid() PRIMARY KEY,
@@ -78,17 +90,20 @@ CREATE TABLE subscriptions (
   created_at              TIMESTAMPTZ DEFAULT NOW(),
   updated_at              TIMESTAMPTZ DEFAULT NOW()
 );
- 
+
 -- ── Indexes ──────────────────────────────────────────────────
-CREATE INDEX idx_agents_workspace       ON agents(workspace_id);
-CREATE INDEX idx_tasks_workspace        ON tasks(workspace_id);
-CREATE INDEX idx_tasks_agent            ON tasks(assigned_agent_id);
-CREATE INDEX idx_tasks_status           ON tasks(status);
-CREATE INDEX idx_collaborations_task    ON collaborations(task_id);
-CREATE INDEX idx_meeting_workspace      ON meeting_messages(workspace_id);
-CREATE INDEX idx_meeting_session        ON meeting_messages(session_id);
-CREATE INDEX idx_subscriptions_workspace ON subscriptions(workspace_id);
- 
+CREATE INDEX idx_agents_workspace           ON agents(workspace_id);
+CREATE INDEX idx_tasks_workspace            ON tasks(workspace_id);
+CREATE INDEX idx_tasks_agent                ON tasks(assigned_agent_id);
+CREATE INDEX idx_tasks_status               ON tasks(status);
+CREATE INDEX idx_collaborations_task        ON collaborations(task_id);
+CREATE INDEX idx_meeting_workspace          ON meeting_messages(workspace_id);
+CREATE INDEX idx_meeting_session            ON meeting_messages(session_id);
+CREATE INDEX idx_subscriptions_workspace    ON subscriptions(workspace_id);
+CREATE INDEX idx_execution_logs_task        ON execution_logs(task_id);
+CREATE INDEX idx_execution_logs_agent       ON execution_logs(agent_id);
+CREATE INDEX idx_execution_logs_created     ON execution_logs(created_at DESC);
+
 -- ── RLS ──────────────────────────────────────────────────────
 ALTER TABLE workspaces       ENABLE ROW LEVEL SECURITY;
 ALTER TABLE agents           ENABLE ROW LEVEL SECURITY;
@@ -96,7 +111,8 @@ ALTER TABLE tasks            ENABLE ROW LEVEL SECURITY;
 ALTER TABLE collaborations   ENABLE ROW LEVEL SECURITY;
 ALTER TABLE meeting_messages ENABLE ROW LEVEL SECURITY;
 ALTER TABLE subscriptions    ENABLE ROW LEVEL SECURITY;
- 
+ALTER TABLE execution_logs   ENABLE ROW LEVEL SECURITY;
+
 -- Open policies (add Supabase Auth in production)
 CREATE POLICY "allow_all" ON workspaces       FOR ALL USING (true);
 CREATE POLICY "allow_all" ON agents           FOR ALL USING (true);
@@ -104,3 +120,4 @@ CREATE POLICY "allow_all" ON tasks            FOR ALL USING (true);
 CREATE POLICY "allow_all" ON collaborations   FOR ALL USING (true);
 CREATE POLICY "allow_all" ON meeting_messages FOR ALL USING (true);
 CREATE POLICY "allow_all" ON subscriptions    FOR ALL USING (true);
+CREATE POLICY "allow_all" ON execution_logs   FOR ALL USING (true);

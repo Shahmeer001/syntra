@@ -1,139 +1,182 @@
-from langgraph.graph import StateGraph, END
+"""
+task_agent.py - Updated ReAct agent with role-specific tool execution.
+Switches from a linear chain to a tool-calling loop.
+"""
+
+from langgraph.prebuilt import create_react_agent
 from langchain_groq import ChatGroq
 from langchain_core.messages import HumanMessage, SystemMessage
-from typing import TypedDict, List, Optional
-import json
+from typing import Optional
 import os
 from dotenv import load_dotenv
+from agents.tools import get_tools_for_role
 
 load_dotenv()
 
-llm = ChatGroq(model="llama-3.3-70b-versatile", api_key=os.getenv("GROQ_API_KEY"), temperature=0.3)
+llm = ChatGroq(
+    model="llama-3.3-70b-versatile",
+    api_key=os.getenv("GROQ_API_KEY"),
+    temperature=0.3
+)
 
 
-class TaskState(TypedDict):
-    title: str
-    description: str
-    agent_role: str
-    agent_persona: Optional[str]
-    reasoning: Optional[str]
-    priority: Optional[str]
-    subtasks: Optional[List[dict]]
-    thoughts: Optional[List[str]]
-    status: Optional[str]
+def run_task_agent(
+    title: str,
+    description: str,
+    agent_persona: Optional[str] = None,
+    agent_role: str = "General"
+) -> dict:
+    """
+    Run the ReAct agent for a given task using role-specific tools.
 
+    Flow:
+    1. Get tools assigned to this agent's role
+    2. Create a ReAct agent with those tools
+    3. Agent decides which tools to call and in what order
+    4. Collect all tool outputs and thoughts
+    5. Return structured result
 
-def analyze(state: TaskState) -> TaskState:
-    thoughts = state.get("thoughts", [])
-    thoughts.append("🔍 Analyzing task scope and requirements...")
+    Args:
+        title: Task title
+        description: Task description
+        agent_persona: Agent's system persona
+        agent_role: Role (Finance, Marketing, Product, Operations, Sales, Legal)
 
-    persona = state.get("agent_persona") or f"You are a {state['agent_role']} specialist."
+    Returns:
+        Dict with priority, reasoning, subtasks, thoughts, status, tool_outputs
+    """
 
-    response = llm.invoke([
-        SystemMessage(content=persona),
-        HumanMessage(content=f"""Analyze this task as a {state['agent_role']} specialist:
-Title: {state['title']}
-Description: {state['description']}
+    # === Get role-specific tools ===
+    tools = get_tools_for_role(agent_role)
+    tool_names = [t.name for t in tools]
 
-Write 2-3 sentences covering: what this requires, its complexity, and key challenges. Plain text only.""")
-    ])
+    # === Build system prompt ===
+    persona = agent_persona or f"You are a {agent_role} specialist with deep domain expertise."
 
-    thoughts.append(f"💭 {response.content[:120]}...")
-    return {**state, "reasoning": response.content, "thoughts": thoughts}
+    system_prompt = f"""{persona}
 
+You have access to the following tools: {', '.join(tool_names)}
 
-def prioritize(state: TaskState) -> TaskState:
-    thoughts = state.get("thoughts", [])
-    thoughts.append("⚖️ Assessing priority level...")
+Your job is to EXECUTE the task fully using your available tools. Do not just plan — actually do the work.
 
-    response = llm.invoke([
-        SystemMessage(content="You are a priority assessment engine. Respond ONLY with valid JSON, no markdown."),
-        HumanMessage(content=f"""Task: {state['title']}
-Analysis: {state['reasoning']}
+Guidelines:
+- Use tools in a logical order to complete the task
+- Use web_search_tool first if you need current information
+- Use write_content to produce any written deliverables
+- Use generate_report to produce structured documents
+- Use analyze_numbers when working with data or metrics
+- Use analyze_audience when defining target markets (Marketing only)
+- Use read_document when analyzing contracts or legal text (Legal only)
+- After using tools, summarize what was accomplished
 
-Respond with ONLY this JSON:
-{{"priority": "High" or "Medium" or "Low", "reason": "one sentence"}}""")
-    ])
+Always complete the task fully. Do not stop halfway."""
+
+    # === Create ReAct agent ===
+    agent = create_react_agent(llm, tools)
+
+    # === Build task message ===
+    task_message = f"""Execute this task completely:
+
+Title: {title}
+Description: {description}
+
+Use your available tools to fully complete this task. Produce real, usable output."""
+
+    thoughts = [f"🚀 {agent_role} Agent initialized with tools: {', '.join(tool_names)}"]
+    tool_outputs = []
+    priority = "Medium"
+    subtasks = []
 
     try:
-        data = json.loads(response.content.strip().replace("```json", "").replace("```", ""))
-        priority = data.get("priority", "Medium")
-        thoughts.append(f"🎯 Priority: {priority} — {data.get('reason', '')}")
-    except Exception:
-        priority = "Medium"
-        thoughts.append("🎯 Priority defaulted to Medium")
+        # === Run the agent ===
+        thoughts.append("🧠 Analyzing task and selecting tools...")
 
-    return {**state, "priority": priority, "thoughts": thoughts}
+        result = agent.invoke({
+            "messages": [
+                SystemMessage(content=system_prompt),
+                HumanMessage(content=task_message)
+            ]
+        })
+
+        # === Extract messages and tool calls ===
+        messages = result.get("messages", [])
+
+        for msg in messages:
+            msg_type = type(msg).__name__
+
+            # Tool call messages
+            if msg_type == "AIMessage" and hasattr(msg, "tool_calls") and msg.tool_calls:
+                for tc in msg.tool_calls:
+                    tool_name = tc.get("name", "unknown")
+                    thoughts.append(f"🔧 Calling tool: {tool_name}")
+
+            # Tool result messages
+            if msg_type == "ToolMessage":
+                tool_outputs.append({
+                    "tool": msg.name if hasattr(msg, "name") else "tool",
+                    "output": msg.content
+                })
+                thoughts.append(f"✅ Tool completed: {msg.name if hasattr(msg, 'name') else 'tool'}")
+
+        # === Get final response ===
+        final_message = ""
+        for msg in reversed(messages):
+            if type(msg).__name__ == "AIMessage" and msg.content:
+                final_message = msg.content
+                break
+
+        thoughts.append("🎉 Task execution completed")
+
+        # === Assess priority based on task ===
+        priority = _assess_priority(title, description)
+
+        # === Build subtasks from tool outputs ===
+        subtasks = _build_subtasks_from_outputs(tool_outputs, tool_names)
+
+        return {
+            "priority": priority,
+            "reasoning": final_message,
+            "subtasks": subtasks,
+            "thoughts": thoughts,
+            "status": "done",
+            "tool_outputs": tool_outputs,
+        }
+
+    except Exception as e:
+        thoughts.append(f"❌ Execution error: {str(e)}")
+        return {
+            "priority": "Medium",
+            "reasoning": f"Task execution encountered an error: {str(e)}",
+            "subtasks": [],
+            "thoughts": thoughts,
+            "status": "error",
+            "tool_outputs": tool_outputs,
+        }
 
 
-def decompose(state: TaskState) -> TaskState:
-    thoughts = state.get("thoughts", [])
-    thoughts.append("🔨 Breaking into actionable subtasks...")
+def _assess_priority(title: str, description: str) -> str:
+    """Quick priority assessment based on keywords."""
+    text = (title + " " + description).lower()
+    high_keywords = ["urgent", "critical", "asap", "immediately", "deadline", "crisis", "emergency"]
+    low_keywords = ["low priority", "when possible", "sometime", "optional", "nice to have"]
 
-    response = llm.invoke([
-        SystemMessage(content="You are a task decomposition engine. Respond ONLY with a valid JSON array, no markdown."),
-        HumanMessage(content=f"""Task: {state['title']}
-Description: {state['description']}
-Role: {state['agent_role']}
-Priority: {state['priority']}
-
-Return ONLY a JSON array of 3-5 subtasks:
-[{{"id": 1, "title": "...", "description": "...", "estimated_time": "...", "order": 1}}]""")
-    ])
-
-    try:
-        subtasks = json.loads(response.content.strip().replace("```json", "").replace("```", ""))
-        thoughts.append(f"✅ Generated {len(subtasks)} subtasks")
-    except Exception:
-        subtasks = [
-            {"id": 1, "title": "Plan approach", "description": "Define steps and requirements", "estimated_time": "15 min", "order": 1},
-            {"id": 2, "title": "Execute", "description": "Carry out the primary work", "estimated_time": "1 hr", "order": 2},
-            {"id": 3, "title": "Review", "description": "Check quality and completeness", "estimated_time": "20 min", "order": 3},
-        ]
-        thoughts.append("✅ Generated default subtasks")
-
-    return {**state, "subtasks": subtasks, "thoughts": thoughts}
+    if any(k in text for k in high_keywords):
+        return "High"
+    if any(k in text for k in low_keywords):
+        return "Low"
+    return "Medium"
 
 
-def finalize(state: TaskState) -> TaskState:
-    thoughts = state.get("thoughts", [])
-    thoughts.append("🎉 Task processed and ready for execution.")
-    return {**state, "status": "processed", "thoughts": thoughts}
-
-
-def build_graph():
-    g = StateGraph(TaskState)
-    g.add_node("analyze", analyze)
-    g.add_node("prioritize", prioritize)
-    g.add_node("decompose", decompose)
-    g.add_node("finalize", finalize)
-    g.set_entry_point("analyze")
-    g.add_edge("analyze", "prioritize")
-    g.add_edge("prioritize", "decompose")
-    g.add_edge("decompose", "finalize")
-    g.add_edge("finalize", END)
-    return g.compile()
-
-
-_graph = build_graph()
-
-
-def run_task_agent(title: str, description: str, agent_persona: str = None, agent_role: str = "General") -> dict:
-    result = _graph.invoke({
-        "title": title,
-        "description": description,
-        "agent_role": agent_role,
-        "agent_persona": agent_persona,
-        "reasoning": None,
-        "priority": None,
-        "subtasks": None,
-        "thoughts": ["🚀 Syntra agent initialized..."],
-        "status": "pending",
-    })
-    return {
-        "priority": result["priority"],
-        "reasoning": result["reasoning"],
-        "subtasks": result["subtasks"],
-        "thoughts": result["thoughts"],
-        "status": result["status"],
-    }
+def _build_subtasks_from_outputs(tool_outputs: list, tool_names: list) -> list:
+    """Convert tool outputs into subtask list for UI display."""
+    subtasks = []
+    for i, output in enumerate(tool_outputs, 1):
+        subtasks.append({
+            "id": i,
+            "title": f"Step {i}: {output['tool'].replace('_', ' ').title()}",
+            "description": output["output"][:200] + "..." if len(output["output"]) > 200 else output["output"],
+            "estimated_time": "Completed",
+            "order": i,
+            "status": "done"
+        })
+    return subtasks
